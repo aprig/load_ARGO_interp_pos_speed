@@ -1,6 +1,6 @@
 # Argo Under-Ice Position Correction Pipeline
 
-Processing pipeline to correct and estimate positions of Argo profiling floats operating under sea ice, using a terrain-following bathymetry algorithm. Output files are formatted for assimilation into the [ISAS](https://www.seanoe.org/data/00412/52367/) ocean analysis system.
+Processing pipeline to correct and estimate positions of Argo profiling floats operating under sea ice, using a terrain-following bathymetry algorithm. 
 
 ---
 
