@@ -1,6 +1,6 @@
 # Argo Under-Ice Position Correction Pipeline
 
-Processing pipeline to correct and estimate positions of Argo profiling floats operating under sea ice, using a terrain-following bathymetry algorithm. 
+Processing pipeline to correct and estimate positions of Argo profiling floats operating under sea ice, using a terrain-following bathymetry algorithm. Output files are formatted for assimilation into the [ISAS](https://www.seanoe.org/data/00412/52367/) ocean analysis system.
 
 ---
 
@@ -181,6 +181,21 @@ pos_bathy_follow_wmo = [
 ```
 
 All other floats in `list_wmo` are processed by Loop 1.
+
+---
+
+## Coverage Map
+
+Arctic float positions by position QC flag in the final dataset:
+
+![Arctic float positions by QC flag](figures/plot_spatial_distribution_v3.png)
+
+| Panel | Colour | Description |
+|---|---|---|
+| Top-left | Blue | QC1 — valid GPS fixes |
+| Top-right | Red | QC8 — linearly/geodesically interpolated positions |
+| Bottom-left | Green | QC7 — terrain-following corrected positions (this pipeline) |
+| Bottom-right | Magenta | QC1 or QC7 — all positions retained in the final merged dataset |
 
 ---
 
