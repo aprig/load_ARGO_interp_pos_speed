@@ -19,7 +19,7 @@ The pipeline produces one NetCDF file per float per variable (temperature, salin
 
 ```
 .
-├── process_argo_arctic.ipynb     # Main processing notebook (both loops)
+├──  load_interp_ARGO_data_temp_psal_no_qc_trajlon_trajlat.ipynb     # Main processing notebook (both loops)
 ├── README.md
 ```
 
