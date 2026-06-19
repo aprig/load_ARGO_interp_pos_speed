@@ -96,7 +96,7 @@ These files are expected at `/data0/user/aprigent/texas/`.
 16. **Convert to Absolute Salinity** — `gsw.SA_from_SP` using pressure, longitude, and latitude
 17. **Convert to potential temperature** — `gsw.pt_from_t` referenced to surface (p_ref = 0)
 18. **Add date/time metadata** — split ordinal date into `prof_YYYYMMDD` and `prof_HHMMSS`
-19. **Save** — single merged file `ARGO_ASTE_common_v3.nc`
+19. **Save** — single merged file `ARGO_ASTE_common_v4.nc`
 
 ---
 
