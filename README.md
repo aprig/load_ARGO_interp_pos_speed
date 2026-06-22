@@ -144,5 +144,4 @@ corrected), and the union of 1/7/8, saved as
   remain in the code for reference/future use.
 - File paths, the float blacklist, and the bathymetry-following float list
   are all hard-coded and should be reviewed before reuse on a new dataset.
-- The script is structured as a converted Jupyter notebook (`# In[ ]:` cell
-  markers); it should still run top-to-bottom as a plain `.py` file.
+
