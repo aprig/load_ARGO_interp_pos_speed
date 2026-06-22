@@ -1,6 +1,6 @@
 # Argo Arctic Profile Processing for ASTE
 
-
+![Spatial distribution of QC flags](/figures/plot_spatial_distribution_v4.png)
 
 ## Overview
 
