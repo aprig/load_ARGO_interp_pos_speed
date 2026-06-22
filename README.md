@@ -1,207 +1,148 @@
-# Argo Under-Ice Position Correction Pipeline
+# Argo Arctic Profile Processing for ASTE
 
-Processing pipeline to correct and estimate positions of Argo profiling floats operating under sea ice, using a terrain-following bathymetry algorithm. Output files are formatted for assimilation into the [ISAS](https://www.seanoe.org/data/00412/52367/) ocean analysis system.
 
----
 
 ## Overview
 
-Argo floats under sea ice cannot obtain GPS fixes and are assigned interpolated positions (POSITION_QC = 8) or missing positions (POSITION_QC = 9). This pipeline replaces those positions with estimates from a terrain-following algorithm constrained by GEBCO bathymetry and the float's parking depth, then interpolates the corrected profiles onto the standard ISAS vertical grid.
+This script builds a quality-controlled, vertically-interpolated temperature
+and salinity (T/S) profile dataset from Argo float data in the Arctic, for
+use with the Arctic Subpolar gyre sTate Estimate (ASTE). It:
 
-The position estimation is based on the method of [Yamazaki et al. (2019)](https://doi.org/10.1029/2019JC015406), as improved and implemented by the Coriolis team:
-[https://github.com/cabanesc/Coriolis-under-ice-positioning](https://github.com/cabanesc/Coriolis-under-ice-positioning/blob/develop/estimate_profile_locations.m)
+1. Reads raw Argo NetCDF profile files (`*_prof.nc`) and trajectory files
+   (`*_Rtraj.nc`).
+2. Applies quality control (QC) on time, position, pressure, and the T/S
+   variables themselves.
+3. For a subset of floats that drift under sea ice, replaces interpolated
+   positions (`POSITION_QC = 8`) with terrain-following position estimates
+   from an external trajectory-correction algorithm (Yamazaki et al., 2019),
+   and computes drift speed.
+4. Interpolates T/S profiles onto the standard ISAS17 vertical grid using an
+   Akima 1D spline.
+5. Writes per-float NetCDF files, merges them into combined PSAL/TEMP
+   datasets, intersects them to keep only profiles present in both, converts
+   in-situ temperature/practical salinity to potential temperature/absolute
+   salinity (via the TEOS-10 `gsw` toolbox), and writes a final merged
+   dataset.
+6. Produces simple diagnostic maps of float positions and QC flags.
 
-The pipeline produces one NetCDF file per float per variable (temperature, salinity), containing profiles interpolated on the ISAS vertical grid along with corrected positions, drift speeds, grounding flags, and parking depths. A final merging step combines all floats into a single unified T/S NetCDF, converts in-situ temperature to potential temperature, and adds date/time metadata for use in ASTE.
+## Requirements
 
----
+- Python 3 with: `xarray`, `numpy`, `pandas`, `matplotlib`, `cartopy`, `gsw`
+- `ArcTools` — a local/custom module providing `plot_arctic_ax_map_new`
+  (Arctic basemap plotting helper)
+- Input data (see **Data layout** below)
 
-## Repository Structure
+## Data layout (paths are hard-coded in the script)
 
-```
-.
-├── process_argo_arctic.ipynb       # Single notebook containing all processing steps
-├── README.md
-```
-
-The notebook is organised in three sequential sections:
-
-- **Loop 1**: processes floats whose positions are all valid (POSITION_QC = 1) or linearly/geodesically interpolated (QC = 8). No external correction file is needed.
-- **Loop 2**: loads pre-computed CSV files from the Coriolis terrain-following tool and replaces interpolated positions with bathymetry-constrained estimates. Floats are listed in `pos_bathy_follow_wmo`.
-- **Merging**: loads the per-float TEMP and PSAL files produced by the two loops, finds profiles common to both variables, converts in-situ temperature to potential temperature, and writes a single merged NetCDF ready for assimilation into ASTE.
-
----
-
-## Dependencies
-
-| Package | Purpose |
+| Path | Description |
 |---|---|
-| `xarray` | NetCDF I/O and dataset construction |
-| `numpy` | Array operations |
-| `pandas` | Reading terrain-following CSV output |
-| `gsw` | Pressure/depth conversion, Absolute Salinity, potential temperature (TEOS-10) |
-| `scipy` | Akima 1D interpolation onto ISAS grid |
+| `/data0/user/aprigent/ISAS/ISAS17_Mask.nc` | ISAS17 vertical grid (`depthCFD`), used as the target interpolation depth levels |
+| `/data0/user/aprigent/ARGO/Arctic/*_prof.nc` | Raw Argo profile files (one per float, WMO number in filename) |
+| `/data0/user/aprigent/ARGO/Arctic/*_Rtraj.nc` | Argo trajectory files (grounding flag, park pressure) |
+| `/data0/user/aprigent/ARGO/estimate_profile_locations_<WMO>.csv` | Terrain-following corrected positions/speeds for floats that drift under bathymetry-following ice (see "special-handling floats" below) |
+| `/data0/user/aprigent/texas/ARGO/bottom_interp_speed/` | Output directory for per-float interim NetCDF files |
+| `/data0/user/aprigent/texas/ARGO_bottom_interp_speed_ASTE_PSAL.nc` / `..._TEMP.nc` | Merged PSAL/TEMP datasets across all floats |
+| `/data0/user/aprigent/texas/ARGO_ASTE_common_v4.nc` | **Final output**: common T/S profiles with potential temperature, on the ISAS vertical grid |
 
-The terrain-following position estimates must be pre-computed using the MATLAB tool at [cabanesc/Coriolis-under-ice-positioning](https://github.com/cabanesc/Coriolis-under-ice-positioning), which produces one CSV per float named `estimate_profile_locations_{WMO}.csv`.
+Update these paths at the top of each section if running on a different
+system.
 
----
+## Processing steps in detail
 
-## Inputs
+### 1. Vertical grid
+The target depth levels (`zi`) are read from the ISAS17 land/ocean mask file
+and reused throughout for vertical interpolation.
 
-**Loop 1 & Loop 2 — per-float processing**
+### 2. `interp_prof` — Akima vertical interpolation
+For each profile, valid (non-NaN) points common to both the depth and data
+arrays are interpolated onto the ISAS depth grid using
+`scipy.interpolate.Akima1DInterpolator`. Profiles with fewer than 2 valid
+points, or that raise a `ValueError` during interpolation, are skipped.
+Returns the interpolated array and the indices of the profiles that
+succeeded, so downstream metadata can stay aligned.
 
-| File | Description |
-|---|---|
-| `{WMO}_prof.nc` | Argo mono-profile NetCDF (format version 3.1) |
-| `{WMO}_Rtraj.nc` | Argo trajectory NetCDF — provides grounding flag and representative park pressure |
-| `estimate_profile_locations_{WMO}.csv` | Terrain-following position estimates (Loop 2 only) |
-| `ISAS17_Mask.nc` | ISAS mask file — provides the standard vertical depth grid `zi` |
+### 3. Main loop — standard floats
+Iterates over every WMO float found in the Argo directory **except**:
+- Floats in `black_list_wmo` (known-bad floats, skipped entirely).
+- Floats in `pos_bathy_follow_wmo` (handled separately in the next loop,
+  because they need the terrain-following position correction).
 
-Input Argo files are expected at `/data0/user/aprigent/ARGO/Arctic/`.
-CSV correction files are expected at `/data0/user/aprigent/ARGO/`.
-The ISAS mask is expected at `/data0/user/aprigent/ISAS/ISAS17_Mask.nc`.
+For each remaining float:
+- Keeps only ascending profiles (`DIRECTION == 'A'`).
+- Adds empty `SPEED` / `SPEED_EST` variables.
+- Loads the matching `_Rtraj.nc` file (if present) to map `GROUNDED` flag and
+  `REPRESENTATIVE_PARK_PRESSURE` onto each profile cycle; missing trajectory
+  files default to "unknown grounding" / NaN park pressure.
+- Applies time QC (`JULD_QC == '1'`) and skips floats with no valid times or
+  whose data entirely predates 2000.
+- Applies pressure QC, then converts pressure to depth with `gsw.z_from_p`.
+- Computes the maximum depth reached while "grounded" (`GROUNDED == 'Y'`).
+- Builds a combined validity mask from position QC (accepts flags `1` and
+  `8`), variable QC flags, pressure QC, and data mode (`D`/`A`/`R` all
+  accepted), and masks out everything that fails.
+- Vertically interpolates T and S onto the ISAS grid via `interp_prof`, then
+  clips to physically realistic ranges (T: −2–30 °C, S: 0–40).
+- Assembles a `prof_descr` platform-ID string, and writes one salinity
+  NetCDF (`<WMO>_ASTE_PSAL.nc`) and one temperature NetCDF
+  (`<WMO>_ASTE_TEMP.nc`) per float, each with full CF-style variable
+  attributes (units, long names, descriptions of the speed variables, etc.).
 
-**Merging step**
+### 4. Second loop — bathymetry-following floats
+Repeats the same QC/interpolation/output pipeline for the floats listed in
+`pos_bathy_follow_wmo` (floats that follow bathymetry while parked/drifting
+under ice and therefore need corrected positions), with one addition:
+- Reads a companion CSV (`estimate_profile_locations_<WMO>.csv`) containing
+  terrain-following corrected longitude/latitude/speed per cycle.
+- For cycles where the original `POSITION_QC == 8`, overwrites
+  `LONGITUDE`/`LATITUDE` with the corrected trajectory position, fills in
+  `SPEED`/`SPEED_EST`, and re-flags `POSITION_QC` as `'7'` ("corrected").
+- Position QC acceptance is extended to include the new flag `7`.
+- Calls `plot_trajectories_new` to visualize raw vs. QC1 vs. grounded
+  positions on an Arctic map before writing the per-float NetCDFs.
 
-| File | Description |
-|---|---|
-| `ARGO_bottom_interp_speed_ASTE_TEMP.nc` | Concatenated temperature file from Loop 1 + Loop 2 |
-| `ARGO_bottom_interp_speed_ASTE_PSAL.nc` | Concatenated salinity file from Loop 1 + Loop 2 |
+### 5. Merge all floats
+All per-float `*_ASTE_PSAL.nc` and `*_ASTE_TEMP.nc` files are concatenated
+along `iPROF` into two combined datasets and saved.
 
-These files are expected at `/data0/user/aprigent/texas/`.
+### 6. Match common T/S profiles
+Because temperature and salinity QC can drop different profiles, a unique
+key (`time_lat_lon_platform`) is built for each profile in both datasets,
+and only profiles present in **both** TEMP and PSAL (`np.intersect1d`) are
+kept, after verifying the two subsets are correctly aligned.
 
----
+### 7. Build the final dataset
+- Recomputes pressure from depth and latitude, converts practical salinity
+  to absolute salinity and in-situ temperature to potential temperature
+  using TEOS-10 (`gsw.conversions`).
+- Assembles `ds_final` with lat/lon, speeds, dates, T/S (and their
+  instrumental errors), grounding/park depth, position QC, and the ISAS
+  depth grid, with full attribute metadata (including the terrain-following
+  algorithm description and reference for QC=7 positions).
+- Replaces `prof_T` with potential temperature and writes the final file:
+  `ARGO_ASTE_common_v4.nc`.
 
-## Processing Steps
+### 8. Quick QC visualization
+Reloads the final file and plots four Arctic maps comparing profile
+locations for QC flags 1 (good), 8 (interpolated), 7 (terrain-following
+corrected), and the union of 1/7/8, saved as
+`plot_spatial_distribution_v4.png`.
 
-**Loop 1 & Loop 2 — per-float processing**
-
-1. **Load profiles** — ascending profiles only (DIRECTION = 'A')
-2. **Apply terrain-following corrections** (Loop 2 only) — replace POSITION_QC=8 positions with bathymetry-constrained estimates from the CSV; set POSITION_QC to 7 for corrected cycles
-3. **Load trajectory file** — extract grounding flag (GROUNDED) and representative park pressure per cycle
-4. **Time QC** — keep profiles with JULD_QC = 1 only
-5. **Position QC** — accept POSITION_QC ∈ {1, 8} (Loop 1) or {1, 7, 8} (Loop 2)
-6. **Pressure QC** — set levels with PRES_QC ≠ 1 to NaN before depth conversion
-7. **Depth conversion** — pressure to depth via `gsw.z_from_p` using profile latitude
-8. **Variable QC** — mask TEMP and PSAL where variable QC ≠ 1
-9. **Vertical interpolation** — Akima 1D interpolation onto the ISAS standard depth grid `zi`
-10. **Range checks** — TEMP ∈ [−2, 30] °C; PSAL ∈ [0, 40] PSU
-11. **Save** — one NetCDF per float per variable (TEMP, PSAL)
-
-**Merging and conversion**
-
-12. **Load** concatenated TEMP and PSAL files across all floats
-13. **Match profiles** — build a unique key from (date, lat, lon, platform ID) and retain only profiles present in both TEMP and PSAL files
-14. **Align** PSAL to the same profile order as TEMP
-15. **Convert pressure** — recompute pressure from ISAS depth levels and profile latitude via `gsw.p_from_z`
-16. **Convert to Absolute Salinity** — `gsw.SA_from_SP` using pressure, longitude, and latitude
-17. **Convert to potential temperature** — `gsw.pt_from_t` referenced to surface (p_ref = 0)
-18. **Add date/time metadata** — split ordinal date into `prof_YYYYMMDD` and `prof_HHMMSS`
-19. **Save** — single merged file `ARGO_ASTE_common_v4.nc`
-
----
-
-## Output Files
-
-**Per-float files** (Loops 1 & 2) — written to `/data0/user/aprigent/texas/ARGO/bottom_interp_speed/`:
-
-```
-{WMO}_ASTE_TEMP.nc
-{WMO}_ASTE_PSAL.nc
-```
-
-**Final merged file** — written to `/data0/user/aprigent/texas/`:
-
-```
-ARGO_ASTE_common_v3.nc
-```
-
-This file contains only profiles present in both TEMP and PSAL, with potential temperature replacing in-situ temperature.
-
-### Key Output Variables
-
-| Variable | Description |
-|---|---|
-| Variable | Description | File |
-|---|---|---|
-| `prof_lat` / `prof_lon` | Profile position (observed or interpolated; corrected for under-ice floats in Loop 2) | per-float + merged |
-| `prof_lat_traj` / `prof_lon_traj` | Terrain-following estimated position (NaN where algorithm did not converge) | per-float + merged |
-| `prof_speed` | Drift speed from initial interpolated trajectory (cm/s) | per-float + merged |
-| `prof_speed_traj` | Drift speed from terrain-following estimated trajectory (cm/s) | per-float + merged |
-| `prof_T` | In-situ temperature on ISAS vertical grid (per-float); potential temperature (merged) | per-float + merged |
-| `prof_S` | Practical salinity on ISAS vertical grid | per-float + merged |
-| `prof_date` | Profile date (days since 0001-01-01, Python ordinal) | per-float + merged |
-| `prof_YYYYMMDD` | Profile date in YYYYMMDD format | merged only |
-| `prof_HHMMSS` | Profile time in HHMMSS format (set to 110000) | merged only |
-| `prof_pos` | POSITION_QC flag (1 = GPS fix, 7 = terrain-following corrected, 8 = interpolated) | per-float + merged |
-| `prof_grnd` | Grounding flag (Y/B/N/S/U — see below) | per-float + merged |
-| `prof_pdep` | Parking depth (m) | per-float + merged |
-| `prof_gdep` | Maximum depth reached when grounded (m) | per-float + merged |
-| `prof_descr` | Platform identifier (WMO number, 30-char string) | per-float + merged |
-| `prof_depth` | ISAS depth levels (m, positive down) | per-float + merged |
-
-### Grounding Flag Values (`prof_grnd`)
+## Key QC / flag conventions
 
 | Flag | Meaning |
 |---|---|
-| `Y` | Float touched the seafloor |
-| `B` | Bathymetry verified — float constrained by depth |
-| `N` | No seafloor contact |
-| `S` | Shallow drift — float stuck near surface |
-| `U` | Unknown |
+| `POSITION_QC = 1` | Good GPS fix |
+| `POSITION_QC = 8` | Interpolated/estimated position (e.g., under ice) |
+| `POSITION_QC = 7` | Position corrected via terrain-following algorithm (assigned by this script) |
+| `prof_grnd = Y/B/N/S/U` | Ground contact / bathymetry-verified / no contact / shallow drift / unknown |
 
-### Speed Variables — Formula
+## Notes & caveats
 
-Both speed variables are computed as:
-
-```
-speed = 100 × geodesic_distance(pos[i−1], pos[i]) / ((time[i] − time[i−1]) × 86400)
-```
-
-where the result is in **cm/s**, distance is in metres, and time is in days.
-
-- `prof_speed` uses the **initial interpolated positions** and `JULD_LOCATION` as the time reference.
-- `prof_speed_traj` uses the **terrain-following estimated positions** (`TrajLon/TrajLat`) and `JULD` (profile date) as the time reference.
-
----
-
-## Float Lists
-
-**Black list** (excluded entirely):
-```python
-black_list_wmo = ['4900501', '6900648', '6900195']
-```
-
-**Terrain-following floats** (processed by Loop 2):
-```python
-pos_bathy_follow_wmo = [
-    '6903119', '6903143', '6903144', '6903145', '6903146',
-    '6903147', '7901038', '3902112', '3902118', '4903655',
-    '6903587', '6903588', '6903589', '6904087', '7900549', '7902188'
-]
-```
-
-All other floats in `list_wmo` are processed by Loop 1.
-
----
-
-## Coverage Map
-
-Arctic float positions by position QC flag in the final dataset:
-
-![Arctic float positions by QC flag](figures/plot_spatial_distribution_v3.png)
-
-| Panel | Colour | Description |
-|---|---|---|
-| Top-left | Blue | QC1 — valid GPS fixes |
-| Top-right | Red | QC8 — linearly/geodesically interpolated positions |
-| Bottom-left | Green | QC7 — terrain-following corrected positions (this pipeline) |
-| Bottom-right | Magenta | QC1 or QC7 — all positions retained in the final merged dataset |
-
----
-
-## References
-
-- Yamazaki, K., Aoki, S., Shimada, K., Kobayashi, T., & Kitade, Y. (2020). Structure of the subpolar gyre in the Australian-Antarctic Basin derived from Argo floats. *Journal of Geophysical Research: Oceans*, 125, e2019JC015406. https://doi.org/10.1029/2019JC015406
-- Cabanes, C. et al. — Coriolis under-ice positioning tool: https://github.com/cabanesc/Coriolis-under-ice-positioning
-- ISAS — In Situ Analysis System: https://www.seanoe.org/data/00412/52367/
-- GEBCO Bathymetric Chart of the Oceans: https://www.gebco.net
+- Several blocks of trajectory-attribute metadata (`prof_lon_traj`,
+  `prof_lat_traj`, etc.) are commented out in the source — those variables
+  are not currently written, even though their full attribute dictionaries
+  remain in the code for reference/future use.
+- File paths, the float blacklist, and the bathymetry-following float list
+  are all hard-coded and should be reviewed before reuse on a new dataset.
+- The script is structured as a converted Jupyter notebook (`# In[ ]:` cell
+  markers); it should still run top-to-bottom as a plain `.py` file.
